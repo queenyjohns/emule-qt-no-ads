@@ -155,14 +155,14 @@ jobs:
           git -c "http.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)" \
             fetch -q --depth=1 origin "+refs/tags/${TAG}:refs/tags/${TAG}"
           sha="$(git for-each-ref --format='%(contents)' "refs/tags/${TAG}" \
-                 | sed -n 's/^GeoLite2-Country-SHA256: *\([0-9a-f]\{64\}\) *$/\1/p' | head -n1)"
+                 | sed -n 's/^GeoLite2-Country-SHA256:[[:space:]]*\([0-9a-f]\{64\}\)[[:space:]]*$/\1/p' | head -n1)"
           if [ -z "$sha" ]; then
             echo "::error::Tag ${TAG} has no 'GeoLite2-Country-SHA256:' line -- create release tags with scripts/publish-release.sh"
             exit 1
           fi
           echo "sha256=${sha}" >> "$GITHUB_OUTPUT"
           rsha="$(git for-each-ref --format='%(contents)' "refs/tags/${TAG}" \
-                  | sed -n 's/^Hoster-Resolver-SHA256: *\([0-9a-f]\{64\}\) *$/\1/p' | head -n1)"
+                  | sed -n 's/^Hoster-Resolver-SHA256:[[:space:]]*\([0-9a-f]\{64\}\)[[:space:]]*$/\1/p' | head -n1)"
           if [ -z "$rsha" ]; then
             # normal now: publish-release.sh publishes the resolver after the tag (publish-resolver.sh)
             echo "::notice::Tag ${TAG} has no 'Hoster-Resolver-SHA256:' line -- the manifest keeps its hosterResolver entry"
