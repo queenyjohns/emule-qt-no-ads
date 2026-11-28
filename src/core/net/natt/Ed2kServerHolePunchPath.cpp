@@ -13,6 +13,7 @@
 #include "server/Server.h"
 #include "utils/Opcodes.h"
 #include "utils/OtherFunctions.h"
+#include "utils/ArgStr.h"
 
 #include <QMessageAuthenticationCode>
 
@@ -25,13 +26,10 @@ bool Ed2kServerHolePunchPath::canServe(const PeerInfo& peer) const
     const Server* server = env().currentServer();
     // An IPv6 session has no IPv4 endpoint to hand out (0x62 reason 5), unless our token
     // 0x9F goes to the server's IPv4 (ed2k-server 0.9.87).
-    if (!server || !server->supportsLowIdHolePunch() || env().ourUdpPort() == 0
-        || keepaliveAddress(*server).isNull() || !peerOnOurServer(peer))
-        return false;
-    // Lugdunum's ID scheme (our own LowID odd): only 0x1000 clients get odd LowIDs, an even
-    // one is a stock client that cannot punch (0x62 reason 4).
-    const bool parityScheme = server->supportsLugdunumNat() && (ourID() & 1) != 0;
-    return !parityScheme || (peer.clientID & 1) != 0;
+    // No ID parity test: an even LowID only lacks 0x1000, it may still have sent its UDP
+    // port (0xF9) and be punchable. The server says no with 0x62 reason 4 (emule-qt#245).
+    return server && server->supportsLowIdHolePunch() && env().ourUdpPort() != 0
+        && !keepaliveAddress(*server).isNull() && peerOnOurServer(peer);
 }
 
 bool Ed2kServerHolePunchPath::request(Attempt& attempt)
@@ -286,8 +284,8 @@ void Ed2kServerHolePunchPath::onInfo(const uint8* data, uint32 size)
         }
     }
     log(QStringLiteral("0x61 peer %1 tcp %2 id %3 role %4%5")
-            .arg(udp.toString()).arg(tcpPort).arg(peerID).arg(role)
-            .arg(extended ? QStringLiteral(" crypt 0x%1").arg(peerCrypt, 0, 16) : QString()));
+            .arg(argStr(udp.toString()), argStr(tcpPort), argStr(peerID), argStr(role),
+                 argStr(extended ? QStringLiteral(" crypt 0x%1").arg(peerCrypt, 0, 16) : QString())));
 
     const Server* server = env().currentServer();
     PeerInfo peer;
@@ -359,10 +357,12 @@ void Ed2kServerHolePunchPath::onFail(const uint8* data, uint32 size)
         return;
     const uint32 target = peekUInt32(data);
     const uint8 reason = data[4];
+    // A refusal only rules out this server's punch: Lugdunum, Kad buddy or direct UDP
+    // may still reach the peer.
     if (Attempt* a = hub().findAttempt([&](const Attempt& x) {
             return x.path == kind() && x.role == Role::Requester && x.peer.clientID == target;
         }))
-        hub().fail(*a, QStringLiteral("server refused (0x62 reason %1)").arg(reason));
+        hub().failOrNext(*a, QStringLiteral("server refused (0x62 reason %1)").arg(reason));
 }
 
 void Ed2kServerHolePunchPath::onCallbackNotice(const uint8* data, uint32 size)
@@ -377,7 +377,7 @@ void Ed2kServerHolePunchPath::onCallbackNotice(const uint8* data, uint32 size)
     if (!foreign && peer.clientID == ourID())
         return;
     log(QStringLiteral("0x37: id %1 at %2 flags 0x%3")
-            .arg(peer.clientID).arg(n->udp.toString()).arg(n->flags, 2, 16, QLatin1Char('0')));
+            .arg(argStr(peer.clientID), argStr(n->udp.toString()), argFmt(n->flags, 2, 16, QLatin1Char('0'))));
     if (foreign) {
         // Logged in elsewhere: no hash, and crypt bits only when it sent them.
         peer.kadEndpoint = n->udp;   // keys the attempt by address (NatRendezvous::peerKey)

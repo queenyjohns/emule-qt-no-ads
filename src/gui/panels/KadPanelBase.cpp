@@ -123,6 +123,7 @@ void KadPanelBase::buildLayout(QWidget* contacts, QWidget* controls, QWidget* se
             m_incomingGraph->setAutoShowLookups(on);
             if (on) {
                 m_incomingPicked = false;
+                m_lookupPicked = false;
                 autoPickLookup();
                 autoPickIncoming();
                 requestIncomingGraph();
@@ -173,6 +174,12 @@ void KadPanelBase::buildLayout(QWidget* contacts, QWidget* controls, QWidget* se
     connect(m_searchesView->selectionModel(), &QItemSelectionModel::selectionChanged, this,
             &KadPanelBase::onSearchSelectionChanged);
     connect(m_searchesView, &QAbstractItemView::doubleClicked, this, &KadPanelBase::onSearchDoubleClicked);
+    // click on an already selected row: no selection change, still a pick; the graph may
+    // show another lookup (auto-show doesn't mark its pick while Contacts is shown)
+    connect(m_searchesView, &QAbstractItemView::clicked, this, [this](const QModelIndex& index) {
+        if (index.isValid())
+            onSearchSelectionChanged();
+    });
     connect(m_incomingView->selectionModel(), &QItemSelectionModel::selectionChanged, this,
             &KadPanelBase::onIncomingSelectionChanged);
     connect(m_incomingView, &QAbstractItemView::doubleClicked, this, [this](const QModelIndex& index) {
@@ -449,7 +456,10 @@ std::uint64_t KadPanelBase::selectedIncomingId() const
 void KadPanelBase::onSearchSelectionChanged()
 {
     const std::uint64_t id = selectedSearchId();
-    if (id == 0 || id == m_graphSearchId)
+    if (id == 0)
+        return;
+    m_lookupPicked = true;   // auto-show marks rows with the signal blocked
+    if (id == m_graphSearchId)
         return;
     m_graphSearchId = id;
     // title and blank graph at once, the picture follows with the reply (MFC UpdateButtonTitle)

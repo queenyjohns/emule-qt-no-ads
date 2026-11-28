@@ -170,6 +170,9 @@ QCborMap toCbor(const bt::BtTorrentRow& r)
         {QStringLiteral("totalSize"), r.totalSize},
         {QStringLiteral("availability"), r.availability},
         {QStringLiteral("i2p"), r.i2p},
+        // Networks column (#261): BtI2pMode, and whether ed3k serves it too
+        {QStringLiteral("i2pMode"), r.i2pMode},
+        {QStringLiteral("ed3kJoined"), Ed3kUploadsBridge::jobJoined(QStringLiteral("torrent"), r.id)},
     };
 }
 
@@ -183,6 +186,8 @@ QCborMap optionsToCbor(const bt::BtTorrentOptions& o)
         {QStringLiteral("ratioPercent"), o.ratioPercent},
         {QStringLiteral("seedTimeMode"), static_cast<int>(o.seedTimeMode)},
         {QStringLiteral("seedTimeMinutes"), o.seedTimeMinutes},
+        {QStringLiteral("minSeedsMode"), static_cast<int>(o.minSeedsMode)},
+        {QStringLiteral("minSeeds"), o.minSeeds},
         {QStringLiteral("i2pMode"), static_cast<int>(o.i2pMode.value_or(bt::BtI2pMode::Direct))},
         // read only: the form greys "I2P only" while mixed, warns while the router is off
         {QStringLiteral("i2pEnabled"), thePrefs.btI2pMode() != Preferences::kBtI2pOff},
@@ -211,6 +216,8 @@ bt::BtTorrentOptions optionsFromCbor(const QCborMap& m)
     o.ratioPercent = static_cast<int>(m.value(QStringLiteral("ratioPercent")).toInteger(100));
     o.seedTimeMode = limitModeOf(m.value(QStringLiteral("seedTimeMode")).toInteger());
     o.seedTimeMinutes = static_cast<int>(m.value(QStringLiteral("seedTimeMinutes")).toInteger(60));
+    o.minSeedsMode = limitModeOf(m.value(QStringLiteral("minSeedsMode")).toInteger());
+    o.minSeeds = static_cast<int>(std::clamp<qint64>(m.value(QStringLiteral("minSeeds")).toInteger(2), 0, 100000));
     if (const QCborValue v = m.value(QStringLiteral("i2pMode")); v.isInteger())
         o.i2pMode = static_cast<bt::BtI2pMode>(std::clamp<qint64>(v.toInteger(), 0, 2));
     return o;
@@ -236,6 +243,10 @@ bt::BtTorrentOptions mergeOptions(const bt::BtTorrentOptions& base, const QCborM
         o.seedTimeMode = sent.seedTimeMode;
     if (has("seedTimeMinutes"))
         o.seedTimeMinutes = sent.seedTimeMinutes;
+    if (has("minSeedsMode"))
+        o.minSeedsMode = sent.minSeedsMode;
+    if (has("minSeeds"))
+        o.minSeeds = sent.minSeeds;
     if (sent.i2pMode)
         o.i2pMode = sent.i2pMode;
     return o;
@@ -939,6 +950,7 @@ bt::BtSettings settingsFromPrefs()
     s.maxConnectionsPerTorrent = thePrefs.btMaxConnectionsPerTorrent();
     s.seedRatioPercent = thePrefs.btSeedRatioPercent();
     s.seedTimeLimitMinutes = thePrefs.btSeedTimeLimitMinutes();
+    s.seedMinSeeds = thePrefs.btSeedMinSeeds();
     s.stopAfterMetadata = thePrefs.btStopAfterMetadata();
     s.userAgent = QStringLiteral("eMuleQt/") + kAppVersion;
     s.versionMajor = EMULE_VERSION_MAJOR;

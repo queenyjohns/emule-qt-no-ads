@@ -670,6 +670,7 @@ private:
     QSpinBox*       m_btMaxActiveSeedSpin = nullptr;
     QDoubleSpinBox* m_btSeedRatioSpin = nullptr;
     QSpinBox*       m_btSeedTimeSpin = nullptr;
+    QSpinBox*       m_btSeedMinSeedsSpin = nullptr;
     QPushButton*    m_btRandomPortBtn = nullptr;
     QCheckBox*      m_btPortMappingCheck = nullptr;
     QSpinBox*       m_btMaxConnSpin = nullptr;
@@ -719,6 +720,7 @@ private:
     QLineEdit* m_feedCategoriesEdit = nullptr;
     QLineEdit* m_feedIndexersEdit = nullptr;
     QLineEdit* m_feedUrlEdit = nullptr;
+    QComboBox* m_feedNetworkCombo = nullptr;
     QLineEdit* m_feedAcceptEdit = nullptr;
     QLineEdit* m_feedRejectEdit = nullptr;
     QSpinBox* m_feedMinSizeSpin = nullptr;

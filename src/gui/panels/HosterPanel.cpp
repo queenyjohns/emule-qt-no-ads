@@ -8,6 +8,7 @@
 
 #include "app/IpcClient.h"
 #include "app/UiState.h"
+#include "controls/FilterEdit.h"
 #include "controls/StatusFilterBar.h"
 #include "controls/TorrentListModel.h"
 #include "controls/TorrentProgressDelegate.h"
@@ -30,6 +31,7 @@
 #include "utils/StringUtils.h"
 #include "IpcMessage.h"
 #include "app/SkinIcons.h"
+#include "utils/ArgStr.h"
 
 #include <QAction>
 #include <QApplication>
@@ -401,6 +403,11 @@ HosterPanel::HosterPanel(QWidget* parent)
     auto* dlcBtn = new QPushButton(menuIcon("DLC.ico"), tr("Open DLC..."), this);
     dlcBtn->setToolTip(tr("Adds the links of a link container (.dlc, .rsdf, .ccf); you can also drop one here"));
     bar->addWidget(dlcBtn);
+    // #282: filter box, "Show more controls" only
+    m_textFilter = new FilterEdit(this);
+    m_textFilter->setFixedWidth(200);
+    m_textFilter->setShown(thePrefs.showExtControls());
+    bar->addWidget(m_textFilter);
     layout->addLayout(bar);
     m_filterBar = new StatusFilterBar(filterNames(), theUiState.hosterFilter(), this);
     m_filterBar->layout()->setContentsMargins(0, 0, 0, 0);
@@ -425,6 +432,9 @@ HosterPanel::HosterPanel(QWidget* parent)
     m_tree->bindColumns(QStringLiteral("hosterList"), {320});
     // After the restore: an older saved state pinned the name column to Stretch
     m_tree->header()->setSectionResizeMode(QHeaderView::Interactive);
+    m_textFilter->setIgnoredColumns({ColProgress});   // bar only
+    m_textFilter->setHeader(m_tree->header());
+    connect(m_textFilter, &FilterEdit::filterChanged, this, &HosterPanel::setTextFilter);
     m_tree->header()->setStretchLastSection(true);
     // favicon + server flag before the hoster, as in Options; every host on a package row
     CountryFlags::bindFlagColumn(m_tree, ColHoster);
@@ -531,6 +541,7 @@ void HosterPanel::showLinkGrabber()
 void HosterPanel::applyDisplayOptions()
 {
     m_filterBar->setRowOn(theUiState.showHosterStatusFilter());
+    m_textFilter->setShown(thePrefs.showExtControls());
 }
 
 void HosterPanel::addLinks(const QStringList& links, const QString& package)
@@ -815,7 +826,7 @@ void HosterPanel::applySources(const QCborMap& sources)
             child->setIcon(ColName, e.icon());
             child->setToolTip(ColName, tip);
             const double pct = e.pieces > 0 ? 100.0 * e.have / e.pieces : 0.0;
-            child->setText(ColProgress, e.pieces > 0 ? QStringLiteral("%1%").arg(pct, 0, 'f', 1) : QString());
+            child->setText(ColProgress, e.pieces > 0 ? QStringLiteral("%1%").arg(formatPercent(pct)) : QString());
             child->setData(ColProgress, Qt::UserRole, pct);
             child->setText(ColSpeed, e.rate > 0 ? formatByteRate(double(e.rate)) : QString());
             child->setData(ColSpeed, Qt::UserRole, e.rate);
@@ -935,7 +946,7 @@ void HosterPanel::updatePackage(qint64 id)
     const double pct = complete == total ? 100.0 : (size > 0 ? 100.0 * double(done) / double(size) : 0.0);
     row->setText(ColSize, size > 0 ? formatByteSize(size) : QString());
     row->setData(ColSize, Qt::UserRole, size);
-    row->setText(ColProgress, QStringLiteral("%1%").arg(pct, 0, 'f', 1));
+    row->setText(ColProgress, QStringLiteral("%1%").arg(formatPercent(pct)));
     row->setData(ColProgress, Qt::UserRole, pct);
     // unfinished items all paused: muted; all failed: red
     setBar(row, parts, pct, complete == total, paused > 0 && paused + complete == total, failed + complete < total);
@@ -969,7 +980,7 @@ void HosterPanel::fillRow(QTreeWidgetItem* row, const QCborMap& it)
     row->setToolTip(ColName, it.value(QStringLiteral("url")).toString());
     row->setText(ColSize, size > 0 ? formatByteSize(size) : QString());
     row->setData(ColSize, Qt::UserRole, size);
-    row->setText(ColProgress, QStringLiteral("%1%").arg(pct, 0, 'f', 1));
+    row->setText(ColProgress, QStringLiteral("%1%").arg(formatPercent(pct)));
     row->setData(ColProgress, Qt::UserRole, pct);
     setBar(row, {{size, state == kStateComplete ? size : done}}, pct, state == kStateComplete, state == kStatePaused,
            state <= kStateComplete);
@@ -1552,9 +1563,9 @@ void HosterPanel::onContainer(const QCborMap& c, const QCborArray& links)
 
     if (cnl)
         logInfo(QStringLiteral("%1: %2 link(s) from %3, asking which to add")
-                    .arg(grab ? QStringLiteral("Clipboard") : QStringLiteral("Click'n'Load"))
-                    .arg(links.size())
-                    .arg(fileName));
+                    .arg(argStr(grab ? QStringLiteral("Clipboard") : QStringLiteral("Click'n'Load")),
+                         argStr(links.size()),
+                         argStr(fileName)));
     QDialog dlg(window());
     dlg.setWindowTitle(grab ? tr("Copied hoster links") : tr("Links of %1").arg(fileName));
     auto* layout = new QVBoxLayout(&dlg);
@@ -1630,6 +1641,18 @@ void HosterPanel::setFilter(int filter)
 {
     m_filter = std::clamp(filter, 0, int(FilterCount) - 1);
     theUiState.setHosterFilter(m_filterBar->current());
+    applyAllFilters();
+}
+
+void HosterPanel::setTextFilter(const QStringList& tokens, int column)
+{
+    m_textTokens = tokens;
+    m_textColumn = column;
+    applyAllFilters();
+}
+
+void HosterPanel::applyAllFilters()
+{
     for (QTreeWidgetItem* row : std::as_const(m_rows))
         applyFilter(row);
     for (QTreeWidgetItem* row : std::as_const(m_packages))
@@ -1638,7 +1661,15 @@ void HosterPanel::setFilter(int filter)
 
 void HosterPanel::applyFilter(QTreeWidgetItem* row)
 {
-    const bool hide = !matchesFilter(m_items.value(row->data(ColName, kItemIdRole).toLongLong()), m_filter);
+    // A package name matches all its items
+    const auto textMatches = [&] {
+        if (FilterEdit::matches(m_textTokens, row->text(m_textColumn)))
+            return true;
+        const QTreeWidgetItem* pkg = row->parent();
+        return m_textColumn == ColName && pkg && FilterEdit::matches(m_textTokens, pkg->text(ColName));
+    };
+    const bool hide = !matchesFilter(m_items.value(row->data(ColName, kItemIdRole).toLongLong()), m_filter)
+                      || (!m_textTokens.isEmpty() && !textMatches());
     if (hide)
         row->setSelected(false);
     row->setHidden(hide);

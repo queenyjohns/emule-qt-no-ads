@@ -38,6 +38,7 @@
 #include "utils/StringUtils.h"
 #include "utils/SafeFile.h"
 #include "utils/TimeUtils.h"
+#include "utils/ArgStr.h"
 
 #include <algorithm>
 
@@ -143,8 +144,8 @@ void DownloadQueue::loadPartMet(const QString& metFile, const PartMetPreload* pr
 
     if (result != PartFileLoadResult::LoadSuccess) {
         logWarning(QStringLiteral("Failed to load part file: %1 (result=%2)")
-                       .arg(filename)
-                       .arg(static_cast<int>(result)));
+                       .arg(argStr(filename),
+                            argStr(static_cast<int>(result))));
         delete partFile;
         return;
     }
@@ -166,12 +167,12 @@ void DownloadQueue::loadPartMet(const QString& metFile, const PartMetPreload* pr
     // Record the state the file came back in — a download that silently
     // loads paused is skipped by process() and will never ask for sources.
     logDebug(QStringLiteral("Loaded part file: %1 — status=%2 paused=%3 gaps=%4 completed=%5/%6")
-                 .arg(partFile->fileName())
-                 .arg(static_cast<int>(partFile->status()))
-                 .arg(partFile->isPaused() ? 1 : 0)
-                 .arg(partFile->gapList().size())
-                 .arg(static_cast<uint64>(partFile->completedSize()))
-                 .arg(static_cast<uint64>(partFile->fileSize())));
+                 .arg(argStr(partFile->fileName()),
+                      argStr(static_cast<int>(partFile->status())),
+                      argStr(partFile->isPaused() ? 1 : 0),
+                      argStr(partFile->gapList().size()),
+                      argStr(static_cast<uint64>(partFile->completedSize())),
+                      argStr(static_cast<uint64>(partFile->fileSize()))));
 }
 
 // ===========================================================================
@@ -526,8 +527,8 @@ UpDownClient* DownloadQueue::checkAndAddSource(PartFile* file, UpDownClient* sou
             }
         }
         logDebug([&]() -> QString { return QStringLiteral("Source rejected — already a source of %1: %2:%3")
-                     .arg(curFile->fileName(), ipstr(cur->connectAddress()))
-                     .arg(cur->userPort()); });
+                     .arg(argStr(curFile->fileName()), argStr(ipstr(cur->connectAddress())),
+                          argStr(cur->userPort())); });
         return true;
     };
     // `file` first: it need not be in files() (tests), and a same-file hit is the common case.
@@ -541,7 +542,7 @@ UpDownClient* DownloadQueue::checkAndAddSource(PartFile* file, UpDownClient* sou
     // Check max sources per file
     if (file->sourceCount() >= static_cast<int>(file->maxSources())) {
         logDebug([&]() -> QString { return QStringLiteral("Source rejected — max sources reached (%1/%2) for %3")
-                     .arg(file->sourceCount()).arg(file->maxSources()).arg(file->fileName()); });
+                     .arg(argStr(file->sourceCount()), argStr(file->maxSources()), argStr(file->fileName())); });
         return nullptr;
     }
 
@@ -641,6 +642,8 @@ void DownloadQueue::addKadSourceResult(const kad::Kademlia::KadSourceResult& res
     const uint16  udpPort    = result.udpPort;
     const uint8*  sourceIPv6 = result.sourceIPv6;
     const uint8*  buddyIPv6  = result.buddyIPv6;
+    // QUIC NAT-T: connect options bit 0x40 (eMuleQt, eMuleAI, aMule) or our TAG_NATT
+    const bool    nattQuic   = (buddyCrypt & CONNECT_OPT_NATT_QUIC) || (result.natt & KADNATT_QUIC);
 
     Q_UNUSED(searchID);
 
@@ -676,7 +679,7 @@ void DownloadQueue::addKadSourceResult(const kad::Kademlia::KadSourceResult& res
             client->setBuddyIPv6(Address::fromIPv6Bytes(buddyIPv6));
         if (addSourceAndConnect(file, client)) {
             logDebug([&]() -> QString { return QStringLiteral("addKadSourceResult: source ADDED type=%1 file=%2 totalSources=%3")
-                         .arg(sourceType).arg(file->fileName()).arg(file->sourceCount()); });
+                         .arg(argStr(sourceType), argStr(file->fileName()), argStr(file->sourceCount())); });
         } else {
             logDebug([&]() -> QString { return QStringLiteral("addKadSourceResult: source REJECTED type=%1 IP=%2:%3")
                          .arg(sourceType).arg(ip).arg(tcpPort); });
@@ -703,8 +706,8 @@ void DownloadQueue::addKadSourceResult(const kad::Kademlia::KadSourceResult& res
         // that is not firewalled never sets bit 3 in the first place.
         client->setConnectOptions(buddyCrypt, true, false);
         logDebug([&]() -> QString { return QStringLiteral("Kad HighID source for %1: type=%2 IP=%3:%4 crypt=0x%5")
-                     .arg(file->fileName()).arg(sourceType).arg(ip).arg(tcpPort)
-                     .arg(buddyCrypt, 2, 16, QLatin1Char('0')); });
+                     .arg(argStr(file->fileName()), argStr(sourceType), argStr(ip), argStr(tcpPort),
+                          argFmt(buddyCrypt, 2, 16, QLatin1Char('0'))); });
         finalizeSource(client);
         break;
     }
@@ -760,14 +763,14 @@ void DownloadQueue::addKadSourceResult(const kad::Kademlia::KadSourceResult& res
         // unless an IPv6 dial reaches the source (tryToConnect).
         if (ip != 0)
             client->setConnectAddress(Address::fromHostOrder(ip));
-        if (result.natt & KADNATT_QUIC)
+        if (nattQuic)
             client->setSupportsNatTQuic(true);
         // bpv: a failed buddy callback asks the pointer for the current buddy (§5.6.1)
         if (result.pointerVersion == KAD_POINTER_VERSION && ip != 0)
             client->setKadPointerSource(ip);
         client->setConnectOptions(buddyCrypt, true, true);
         logDebug([&]() -> QString { return QStringLiteral("Kad FW source for %1: type=%2 buddy=%3:%4")
-                     .arg(file->fileName()).arg(sourceType).arg(buddyIP).arg(buddyPort); });
+                     .arg(argStr(file->fileName()), argStr(sourceType), argStr(buddyIP), argStr(buddyPort)); });
         finalizeSource(client);
         break;
     }
@@ -779,7 +782,7 @@ void DownloadQueue::addKadSourceResult(const kad::Kademlia::KadSourceResult& res
                          .arg(buddyCrypt, 2, 16, QLatin1Char('0')); });
             return;
         }
-        // Not MFC: kept while we are firewalled when the source speaks QUIC NAT-T (TAG_NATT);
+        // Not MFC: kept while we are firewalled when the source speaks QUIC NAT-T (0x40 or TAG_NATT);
         // its UDP is open, so we dial it over QUIC (natt::DirectUdpNatPath).
         if (theApp.isFirewalled()) {
             natt::PeerInfo natPeer;
@@ -789,7 +792,7 @@ void DownloadQueue::addKadSourceResult(const kad::Kademlia::KadSourceResult& res
             }
             if (ip != 0 && udpPort != 0)
                 natPeer.kadEndpoint = Endpoint(Address::fromHostOrder(ip), udpPort);
-            natPeer.directUdp = (result.natt & KADNATT_QUIC) != 0;
+            natPeer.directUdp = nattQuic;
             if (!natPeer.directUdp || !natt::NatRendezvous::keepLowIdSource(natPeer)) {
                 logDebug(QStringLiteral("addKadSourceResult: skipping type 6 — we are firewalled"));
                 return;
@@ -801,7 +804,7 @@ void DownloadQueue::addKadSourceResult(const kad::Kademlia::KadSourceResult& res
         client->setConnectAddress(Address::fromHostOrder(ip));  // IP for UDP, not TCP (MFC:1596)
         if (clientHash)
             client->setUserHash(clientHash);
-        if (result.natt & KADNATT_QUIC)
+        if (nattQuic)
             client->setSupportsNatTQuic(true);
         // callback=true, or setConnectOptions ANDs bit 3 away again and this source is
         // left with no route at all — the check six lines up admitted it precisely
@@ -810,7 +813,7 @@ void DownloadQueue::addKadSourceResult(const kad::Kademlia::KadSourceResult& res
         // still needs the user hash and the Kad port set above, so all three are here.
         client->setConnectOptions(buddyCrypt, true, true);
         logDebug([&]() -> QString { return QStringLiteral("Kad UDP callback source for %1: type=6 IP=%2:%3")
-                     .arg(file->fileName()).arg(ip).arg(tcpPort); });
+                     .arg(argStr(file->fileName()), argStr(ip), argStr(tcpPort)); });
         finalizeSource(client);
         break;
     }
@@ -844,7 +847,7 @@ void DownloadQueue::addKadSourceResult(const kad::Kademlia::KadSourceResult& res
         // callback=false: bit 3 must not turn this into a type-6 source
         client->setConnectOptions(buddyCrypt, true, false);
         logDebug([&]() -> QString { return QStringLiteral("Kad IPv6 route source for %1: type=7 [%2]:%3")
-                     .arg(file->fileName(), v6.toString()).arg(tcpPort); });
+                     .arg(argStr(file->fileName()), argStr(v6.toString()), argStr(tcpPort)); });
         finalizeSource(client);
         break;
     }
@@ -2066,11 +2069,11 @@ bool DownloadQueue::sendGlobGetSourcesUDPPacket(SafeMemFile& data, bool ext2Pack
         theApp.statistics->addUpDataOverheadServer(pktSize);
 
     logDebug([&]() -> QString { return QStringLiteral("DownloadQueue: sending %1 to server %2 (%3 files, %4 large)")
-                 .arg(ext2Packet ? QStringLiteral("OP_GlobGetSources2")
-                                 : QStringLiteral("OP_GlobGetSources"),
-                      m_curUdpServer->addressWithPort())
-                 .arg(nFiles)
-                 .arg(nIncludedLargeFiles); });
+                 .arg(argStr(ext2Packet ? QStringLiteral("OP_GlobGetSources2")
+                                 : QStringLiteral("OP_GlobGetSources")),
+                      argStr(m_curUdpServer->addressWithPort()),
+                      argStr(nFiles),
+                      argStr(nIncludedLargeFiles)); });
 
     m_serverConnect->sendUDPPacket(std::move(pkt), *m_curUdpServer,
                                    static_cast<uint16>(m_curUdpServer->port() + 4));

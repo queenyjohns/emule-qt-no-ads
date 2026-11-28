@@ -30,7 +30,7 @@ Six paths, tried in this order for a source we want to download from:
 | eNode-go `PR_NAT` | flag `0x40000`, or `0x200000` when our login carried it; the peer is on our server and its user hash is known | UDP protocol `0xF1` to the `ST_NAT_PORT` (default 2004) |
 | Foreign callback | the peer is a LowID on **another** server, which announces UDP status flag `0x100000` | server UDP `0xA6` with our ID 0 to that server, UDP `0xA7` back |
 | Kad serving buddy | the source has a serving buddy, Kad connected | `OP_REASKCALLBACKUDP` with an embedded `OP_RENDEZVOUS` |
-| Direct UDP (no introducer) | Kad type 6 source with `nat` QUIC bit, QUIC runs here | `OP_DIRECTCALLBACKREQ` with option `0x40` to the source's Kad endpoint |
+| Direct UDP (no introducer) | Kad type 6 source with QUIC bit (`TAG_ENCRYPTION` `0x40` or `nat` `0x01`), QUIC runs here | `OP_DIRECTCALLBACKREQ` with option `0x40` to the source's Kad endpoint |
 
 All UDP leaves the client UDP socket, so every introducer sees the mapping the peer must punch.
 
@@ -264,17 +264,69 @@ The compatibility target's dialect, adopted unchanged (`natt-transports-emuleai.
 
 - Requester: 6 `OP_HOLEPUNCH` to the source's Kad endpoint (when known), then
   `OP_REASKCALLBACKUDP` to its serving buddy, plain:
-  `<buddy id 16><zero 16><0xA0><our hash 16><opts | 0x20><file hash 16>[<our ip 4><udp port 2><hint 1>]`
-  (66 bytes, or 73 when we know our public IPv4). Hint is 2 (QUIC) while the QUIC transport
-  runs, else 0.
+  `<buddy id 16><zero 16><0xA0><our hash 16><opts | 0x20 [| 0x40 while QUIC runs]><file hash 16><our ip 4><udp port 2><hint 1>[<block>]`
+  Always the full 73 bytes; IP and port are zeros when we don't know our public IPv4 (was 66
+  bytes until 2026-11-27). Hint is 2 (QUIC) while the QUIC transport runs, else 0.
+- Extension block (emule-qt#265, proposed to eMuleAI in eMuleAI#172, aMule buddies carry it
+  since amule-org/amule#2649):
+  `<type 1><len 1><value len>` repeated to the end of the body. Unknown type: skip by length.
+  An element running past the end, or a lone byte at the end, voids the whole block. It
+  follows the hint byte, so eMuleAI (reads up to the hint) and older eMule Qt targets (read up
+  to the endpoint) ignore it.
+
+  | Type | Value | Meaning |
+  | --- | --- | --- |
+  | `0x01` | `<ipv6 16><udp port 2>` (port LE) | requester's IPv6 UDP endpoint. Sent while we have a confident public IPv6; port is the bound UDP port (ToDo: NAT66-mapped port). A longer value is read for its first 18 bytes |
+
+  Type values are proposed in eMuleAI#172 as the one shared table. New types go there first,
+  mentioning aMule: an aMule buddy drops every type it does not know.
+- Readers: both eMule Qt and aMule take the first `0x01` with a good global IPv6 and a nonzero
+  port, reading the first 18 bytes of a longer value.
+- aMule as buddy (`857acc9b6`): forwards only the checked `0x01`, rewritten as one 18-byte
+  element after the tail. As target and requester aMule ignores the block (its NAT-T has no
+  IPv6 UDP socket yet). eMule Qt as buddy forwards the block verbatim; the target checks it.
 - Buddy (we serve one): the existing relay forwards it as a stock `OP_REASKCALLBACKTCP`. When
   the envelope has the zero hash, `0xA0` and option `0x20`, we also send the requester
   `OP_NATT_ENDPOINT_HINT` (`0xAA`, 56 bytes:
   `<ver 1><target hash 16><buddy id 16><file hash 16><ip 4><port 2><opts 1>`) and one
-  `OP_HOLEPUNCH`. The port is the served client's Kad port (ToDo: a per-client observed port).
+  `OP_HOLEPUNCH`. Endpoint = served client's outside UDP endpoint (below); its Kad port
+  only while none is known.
+- Served client's UDP endpoint (emule-qt#281, shared with aMule). Measured behind a home
+  router and a mobile carrier: one outside port for every destination, kept across 150 s
+  idle, inside port *not* kept. So the hello's Kad port is wrong there; the source of the
+  served node's UDP packets is right.
+  - Buddy keeps per client (never per IP) the source of the latest Kad packet from the
+    served node: the `0x51` (`KADEMLIA_FINDBUDDY_REQ`) it accepted, then each refresh. The
+    hello no longer overwrites it (`UpDownClient::servedUdpPort`).
+  - Refresh = the served node repeats its `0x51` unchanged (buddy ID, user hash, TCP port,
+    opts) from the client UDP socket, obfuscated to the buddy's Kad ID with the buddy's
+    receiver key. No new opcode.
+  - Buddy takes a repeat as refresh only with a valid receiver key (proves the IP), the same
+    user hash, and the IP of the first `0x51` (TCP IP for a client that claimed over TCP).
+    Then it updates the port, answers nothing (no `0x52`), and checks no slot or firewall
+    rule. Anything else goes the normal claim path; a buddy that does not know refreshes
+    refuses it there ("already a known client" / own buddy), harmless.
+  - When: with every `OP_BUDDYPING` (first one at link start, then 10 min), and on demand
+    when our buddy relays a `0xA0` to us, at most every 30 s. No 60 s keepalive: the
+    mappings measured outlived 150 s idle, and the on-demand refresh covers a moved one.
+  - Buddy does not hold the hint for the refresh: it sends `0xAA` at once with the port it
+    has. A refresh that moves the port within 3 s of a hint sends one more `0xAA` (same
+    target, buddy ID, file) with the new port. The requester treats it like the first one:
+    one more endpoint to punch, the freshest.
+  - No Kad ID or receiver key for the buddy (not in the routing table or buddy store): no
+    refresh sent; the hint falls back to the first `0x51` source.
 - Target: `processReaskCallbackTCP` sees the zero file hash, reads the embedded opcode and
   starts a target attempt at the endpoint the buddy saw. The self-reported tail is used only
   when that endpoint is not a good public address.
+- Target with an IPv6 of its own and a `0x01` element: also punches the requester's IPv6
+  endpoint, sends the `0x11` handoff there and arms QUIC on it, so QUIC goes first on IPv6
+  (§ Punch and IPv6 handoff). Works when the IPv4 punch never opens (symmetric NAT on both
+  sides). With no usable IPv4 endpoint, the IPv6 one alone starts the attempt.
+- Requester that sent `0x01`: takes a `0x11` handoff from an IPv6 address it never saw when
+  the hash names its target, and keeps that source as the peer's IPv6 UDP endpoint. The target
+  learns nothing of the requester's firewall: a stateful IPv6 firewall on the requester side
+  still drops the target's first datagrams, so this helps when the requester's IPv6 UDP port
+  is reachable (or the IPv4 handoff already got through).
 - The requester accepts a hint only from the source's buddy endpoint, naming the buddy ID it
   sent to. The target's punch from the target's IP also gives the endpoint.
 - A firewalled source with a confident IPv6 publishes it next to its buddy, and the
@@ -295,7 +347,10 @@ publishes Kad type 6 (MFC). A firewalled downloader drops stock type 6 records (
 - Kad tag `nat` (string name, uint8): `0x01` = QUIC NAT-T. Published on every firewalled
   record (types 3, 5, 6) while the QUIC transport runs; never on 1/4. Storing nodes keep
   unknown string tags, like `ip6`. On 3/5 it is only a hint; the buddy path ignores it.
-- Downloader, firewalled, type 6 with `0x01`: keeps the source. It sends
+- The record's connect options (`TAG_ENCRYPTION`) say the same: `0x40` (`CONNECT_OPT_NATT_QUIC`).
+  eMuleAI sets only that bit and no `nat`; aMule reads/sets it too. Receiver takes a source
+  as QUIC capable on `0x40` **or** `nat` `0x01` (types 3, 5, 6).
+- Downloader, firewalled, type 6 with QUIC bit: keeps the source. It sends
   `OP_DIRECTCALLBACKREQ` (`<tcp port 2><our hash 16><opts 1>`, opts = crypt bits | `0x40`) to
   the source's Kad endpoint, obfuscated when the source supports crypt, up to 3 times 2 s apart
   until it dials. The endpoint is known at once: punch, CAPS and the QUIC dial follow as for
@@ -327,7 +382,8 @@ Once an attempt knows the peer's UDP endpoint:
 - `0xC5 0xA1` (`OP_HOLEPUNCH`, empty) every second for 20 s. A punch from the peer's IP on
   another port moves the endpoint there (the datagram source wins).
 - The handoff, `OP_UDPRESERVEDPROT2` (`0xB2`) frame type `0x11`, every 2 s until the peer's
-  arrives, then once as an answer:
+  arrives, then once as an answer. Sent to the peer's IPv6 UDP endpoint too when one is known
+  (`PR_NAT` `SYNC_IPV6`, Kad block `0x01`):
 
 ```
 <version 1 = 1><flags 1><client id 4><user hash 16><connect options 1><tcp port 2>[<ipv6 16>]
@@ -408,7 +464,7 @@ the IP the split side sees). Fix: a per-peer key IP, never our public IP, IPv4 o
   can serve the source, a LowID source goes to `ConnectingState::NatRendezvous` instead of
   failing. `askForDownload` and `PartFile::process` treat such a source as reachable.
 - LowID sources are kept while firewalled when a path could serve them: server sources,
-  Kad firewalled sources (types 3/5, and 6 with `nat`) and source exchange.
+  Kad firewalled sources (types 3/5, and 6 with the QUIC bit) and source exchange.
 - Nothing works without a data path: the QUIC transport (OpenSSL ≥ 3.5 build) or a confident
   public IPv6.
 - Preference `natTraversal` (default on), Options → Server.

@@ -65,12 +65,14 @@
 #include "utils/StatusBarNotifier.h"
 #include "utils/AppActivation.h"
 #include "utils/StringUtils.h"
+#include "dialogs/FolderPickerDialog.h"
 #include "utils/TaskbarProgress.h"
 
 #include "dialogs/PasteLinksDialog.h"
 #include "dialogs/ToolbarCustomizeDialog.h"
 #include "app/SkinIcons.h"
 #include "utils/ModalHost.h"
+#include "utils/ArgStr.h"
 
 #include <QAction>
 #include <QMimeData>
@@ -909,10 +911,10 @@ void MainWindow::setEd3kStatus(const QCborMap& status)
     const QString nodeId = status.value(QStringLiteral("nodeId")).toString();
     // was: m_statusEd3k->setToolTip(tr("ed3k node %1\nUDP port: ...").arg(...));
     QString tip = tr("ed3k node %1\nUDP port: %2\nContacts: %3\nIPv4: %4\nIPv6: %5\nRouter: %6")
-                      .arg(nodeId.left(8).toUpper())
-                      .arg(status.value(QStringLiteral("udpPort")).toInteger())
-                      .arg(contacts)
-                      .arg(className(class4), className(class6), router ? tr("yes") : tr("no"));
+                      .arg(argStr(nodeId.left(8).toUpper()),
+                           argStr(status.value(QStringLiteral("udpPort")).toInteger()),
+                           argStr(contacts),
+                           argStr(className(class4)), argStr(className(class6)), argStr(router ? tr("yes") : tr("no")));
     // firewalled by class only: no ed3k node probed the port (tiny network), vs. a probe failed
     const qint64 untested = status.value(QStringLiteral("natUntested")).toInteger();
     if (firewalled)
@@ -933,8 +935,8 @@ void MainWindow::setEd3kStatus(const QCborMap& status)
     const QCborMap hide = status.value(QStringLiteral("hide")).toMap();
     if (hide.value(QStringLiteral("running")).toBool())
         tip += QLatin1Char('\n') + tr("hidden (%1/%2 paths)")
-                                       .arg(hide.value(QStringLiteral("built")).toInteger())
-                                       .arg(hide.value(QStringLiteral("paths")).toInteger());
+                                       .arg(argStr(hide.value(QStringLiteral("built")).toInteger()),
+                                            argStr(hide.value(QStringLiteral("paths")).toInteger()));
     m_statusEd3k->setToolTip(tip);
     m_statusEd3kIcon->setToolTip(tip);
     m_statusEd3kIcon->show();
@@ -1206,7 +1208,7 @@ void MainWindow::showCoreStartProblem(CoreStartWatch::Problem problem)
     if (problem == Problem::None || !m_ipc)
         return;
 
-    const QString where = QStringLiteral("%1:%2").arg(m_ipc->daemonHost()).arg(m_ipc->daemonPort());
+    const QString where = QStringLiteral("%1:%2").arg(argStr(m_ipc->daemonHost()), argStr(m_ipc->daemonPort()));
     QString text;
     switch (problem) {
     case Problem::CoreExited: {
@@ -1611,6 +1613,13 @@ void MainWindow::buildToolsMenu()
         tr("Import Downloads (eM,eD,ON)..."),
         this, &MainWindow::onImportDownloads);
 
+    // #268, extended controls only (declutter switch)
+    if (thePrefs.showExtControls())
+        m_toolsMenu->addAction(
+            skinIcon(QStringLiteral(":/icons/Incoming.ico")),
+            tr("Backup Config..."),
+            this, &MainWindow::onBackupConfig);
+
     m_toolsMenu->addAction(
         skinIcon(QStringLiteral(":/icons/IPFilter.ico")),
         tr("IP Filter..."),
@@ -1822,6 +1831,41 @@ void MainWindow::onIPFilter()
     // MFC MP_HM_IPFILTER opens CIPFilterDlg, not the options page
     IPFilterDialog dlg(m_ipc, this);
     dlg.exec();
+}
+
+void MainWindow::onBackupConfig()
+{
+    if (!m_ipc || !m_ipc->isConnected()) {
+        QMessageBox::warning(this, tr("Backup Config"), tr("Not connected to the core."));
+        return;
+    }
+    // on the core's disk: a remote core gets its folder tree
+    const QString dir = FolderPickerDialog::getExistingDirectory(
+        this, m_ipc, tr("Backup Config: folder for the backup"), QDir::homePath());
+    if (dir.isEmpty())
+        return;
+    Ipc::IpcMessage req(Ipc::IpcMsgType::BackupConfig);
+    req.append(dir);
+    m_ipc->sendRequest(std::move(req), [self = QPointer<MainWindow>(this)](const Ipc::IpcMessage& resp) {
+        if (!self)
+            return;
+        if (!resp.fieldBool(0)) {
+            QMessageBox::warning(self, tr("Backup Config"),
+                                 tr("The backup failed: %1").arg(resp.fieldString(1)));
+            return;
+        }
+        const QCborMap m = resp.fieldMap(1);
+        const QString folder = QDir::toNativeSeparators(m.value(QStringLiteral("folder")).toString());
+        QString text = tr("Config backed up to\n%1\n\n%2 files, %3.")
+                           .arg(argStr(folder),
+                                argStr(m.value(QStringLiteral("files")).toInteger()),
+                                argStr(formatByteSize(m.value(QStringLiteral("bytes")).toInteger())));
+        if (const auto failed = m.value(QStringLiteral("failed")).toInteger(); failed > 0)
+            text += u'\n' + tr("%1 files could not be copied, see the log.").arg(failed);
+        text += QStringLiteral("\n\n") + tr("To restore: quit eMule Qt and its core, then copy the "
+                                              "folder's contents over the config folder.");
+        QMessageBox::information(self, tr("Backup Config"), text);
+    });
 }
 
 void MainWindow::onPasteLinks()
@@ -2089,7 +2133,7 @@ void MainWindow::loadToolbarSkin(const QString& path)
         return;
     if (!m_toolbarSkin.loadStrip(path)) {
         logWarning(QStringLiteral("Toolbar bitmap %1 is not a strip of %2 or more square tiles, "
-                                  "using the default icons").arg(path).arg(kOfficialToolbarTiles));
+                                  "using the default icons").arg(argStr(path), argStr(kOfficialToolbarTiles)));
     }
 }
 

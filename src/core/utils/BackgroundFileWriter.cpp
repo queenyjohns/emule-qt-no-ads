@@ -4,6 +4,7 @@
 
 #include "utils/BackgroundFileWriter.h"
 #include "utils/Log.h"
+#include "utils/ArgStr.h"
 
 #include <QDir>
 #include <QFile>
@@ -125,6 +126,29 @@ bool BackgroundFileWriter::saveFile(const QString& path, const QByteArray& data)
     return f.commit();
 }
 
+bool BackgroundFileWriter::saveFileKeepBak(const QString& path, const QByteArray& data)
+{
+    keepBak(path);
+    return saveFile(path, data);
+}
+
+void BackgroundFileWriter::keepBak(const QString& path)
+{
+    // a copy, not a rename: the file stays in place should the save fail
+    if (QFileInfo(path).size() <= 0)
+        return;
+    const QString bak = path + QStringLiteral(".bak");
+    QFile::remove(bak);
+    (void)QFile::copy(path, bak);
+}
+
+void BackgroundFileWriter::removeWithBak(const QString& path)
+{
+    discard(path);
+    QFile::remove(path);
+    QFile::remove(path + QStringLiteral(".bak"));
+}
+
 std::optional<QByteArray> BackgroundFileWriter::readFile(const QString& path)
 {
     if (auto queued = instance().pending(path))
@@ -186,7 +210,7 @@ bool BackgroundFileWriter::writeWithRetries(std::unique_lock<std::mutex>& lock, 
         lock.lock();
     }
     if (!ok && !m_writingDropped && !m_jobs.contains(path))
-        logWarning(QStringLiteral("Cannot write %1 (%2 tries)").arg(path).arg(kRetryDelays.size() + 1));
+        logWarning(QStringLiteral("Cannot write %1 (%2 tries)").arg(argStr(path), argStr(kRetryDelays.size() + 1)));
     return ok;
 }
 

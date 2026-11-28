@@ -221,6 +221,9 @@ public:
     [[nodiscard]] bool directUdpCallbackAvailable() const;
     /// Kad callback route usable: buddy ID valid, Kad connected, buddy address or a file.
     [[nodiscard]] bool kadCallbackAvailable() const;
+    /// Both of us are LowID on our server, which offers the IPv6 callback, and our IPv6
+    /// passed its dial-back (ST_IPV6_STATUS 0x07): OP_IPV6_CALLBACK_REQUEST can reach it.
+    [[nodiscard]] bool ipv6CallbackAvailable() const;
 
     [[nodiscard]] uint16 userPort() const { return m_userPort; }
     void setUserPort(uint16 port) { m_userPort = port; sourceIdentityChanged(); }
@@ -365,6 +368,10 @@ public:
     /// the stored server/LowID stale (peer likely moved servers). True when a Kad callback
     /// went out. Not MFC: MFC never leaves the server path while on the same server.
     bool fallBackToKadCallback();
+    /// Our OP_IPV6_CALLBACK_REQUEST for this source was refused (IPV6CB_REFUSED_* @p reason,
+    /// 0 = timed out): skip it for this source for a while and try the next route now. False
+    /// when no IPv6 callback was pending. Not MFC (ed2k-server#62).
+    bool ipv6CallbackFailed(uint8 reason);
 
     [[nodiscard]] InfoPacketState infoPacketsReceived() const { return m_infoPacketsReceived; }
     void setInfoPacketsReceived(InfoPacketState state) { m_infoPacketsReceived = state; }
@@ -849,10 +856,19 @@ public:
     /// appends its own marker, the way MFC's PeerCache appended " Cache".
     [[nodiscard]] virtual QString downloadStateDisplayString() const;
     [[nodiscard]] QString uploadStateDisplayString() const;
-    /// The same as a token for the GUI, which owns the wording; see uploadStalled().
+    /// The same as a token for the GUI, which owns the wording; see uploadWait().
     [[nodiscard]] QString uploadStateToken() const;
-    /// Holding a slot with nothing left to send: the peer stopped asking for blocks.
-    [[nodiscard]] bool uploadStalled() const;
+    /// Why a slot moves nothing, shown in place of Transferring/Standby.
+    enum class UpSlotWait {
+        None,
+        Request,   ///< all sent data acked, no request open for kWaitRequestShowMs (MFC IDS_US_STALLEDW4BR)
+        Ack        ///< sent data sat unacked for kUnackedStuckMs: not reaching the peer
+    };
+    [[nodiscard]] UpSlotWait uploadWait() const;
+    /// uploadWait() as an IPC token: "", "Request" or "Ack".
+    [[nodiscard]] QString uploadWaitToken() const;
+    /// Debounce: a healthy peer asks for the next block within an RTT of the last one.
+    static constexpr uint32 kWaitRequestShowMs = 3'000;
 
     // -- Phase 3 — secure identity ------------------------------------------
 
@@ -916,6 +932,11 @@ public:
     /// ClientList::getBuddy(), the buddy we use ourselves. Cleared with the Kad state.
     [[nodiscard]] bool isServedBuddy() const { return m_servedBuddy; }
     void setServedBuddy(bool val) { m_servedBuddy = val; }
+    /// Served buddy: source of its latest Kad UDP packet to us (FINDBUDDY_REQ or refresh).
+    /// Per client, kept apart from the hello's Kad port, which a NAT does not keep.
+    [[nodiscard]] const Address& servedUdpAddress() const { return m_servedUdpAddr; }
+    [[nodiscard]] uint16 servedUdpPort() const { return m_servedUdpPort; }
+    void setServedUdpSeen(const Address& addr, uint16 port) { m_servedUdpAddr = addr; m_servedUdpPort = port; }
     /// Charges `bytes` relayed to this served buddy; false (nothing charged) when they
     /// would pass the per-minute byte budget.
     [[nodiscard]] bool allowBuddyRelay(uint32 bytes);
@@ -1145,6 +1166,13 @@ public:
     [[nodiscard]] bool isSwapSuspended(const PartFile* file,
                                        bool allowShortReaskTime = false,
                                        bool fileIsNNP = false) const;
+    /// How long a swap to @p file still waits, ms (0: free). @p byStamp: the "don't swap"
+    /// stamp outlasts the re-ask window (A4AF row tooltip).
+    [[nodiscard]] uint64 swapBlockLeft(const PartFile* file, bool allowShortReaskTime,
+                                       bool fileIsNNP, bool* byStamp = nullptr) const;
+    /// A manual A4AF swap: the first re-ask on the new file survives the peer closing
+    /// the connection unanswered (disconnected()). Not MFC.
+    void grantManualSwapGrace() { m_manualSwapGrace = true; }
     [[nodiscard]] uint32 timeUntilReask() const;
     /// @param allowShortReaskTime use MIN_REQUESTTIME instead of FILEREASKTIME, as MFC
     ///        does for a source we hold no conversation with.
@@ -1390,6 +1418,8 @@ private:
     uint16 m_serverPort = 0;
     uint16 m_udpPort = 0;
     uint16 m_kadPort = 0;
+    Address m_servedUdpAddr;         // served buddy: last seen UDP source
+    uint16 m_servedUdpPort = 0;
     Address m_buddyAddress;
     uint16 m_buddyPort = 0;
     std::array<uint8, 16> m_buddyID{};
@@ -1432,6 +1462,8 @@ private:
     Address m_staleCallbackServer;
     uint16 m_staleCallbackServerPort = 0;
     uint32 m_staleCallbackUserID = 0;
+    // No OP_IPV6_CALLBACK_REQUEST for this source before this tick (a refusal or timeout).
+    uint64 m_ipv6CallbackSkipUntil = 0;
     InfoPacketState m_infoPacketsReceived = InfoPacketState::None;
 
     // -- Upload tracking ----------------------------------------------------
@@ -1627,6 +1659,7 @@ private:
     // Swap suspension tracking
     struct FileStamp { PartFile* file = nullptr; uint64 timestamp = 0; };
     std::list<FileStamp> m_dontSwap;
+    bool m_manualSwapGrace = false;   ///< grantManualSwapGrace()
 
     // Per-file reask times
     std::unordered_map<const PartFile*, uint64> m_fileReaskTimes;
@@ -1653,6 +1686,8 @@ private:
     uint64 m_slotLastBacklog = 0;           // unacked bytes at the last noteSendBacklog()
     uint64 m_slotAckProgressTick = 0;       // last time unacked went down or was 0
     uint32 m_slotUnackedStuckMs = 0;        // time since then, while unacked > 0
+    uint64 m_slotNoRequestSinceTick = 0;    // all acked, nothing asked or queued since; 0: busy
+    uint64 m_slotNoRequestMs = 0;           // time since then, as of the last noteSendBacklog()
     std::optional<QString> m_upSlotInfoAtSocketGone;   // upSlotDebugInfo() before the socket went
     // Blocks on the socket not yet sent in full, oldest first. sentMark is
     // m_addedPayloadQueueSession right after the block was queued.

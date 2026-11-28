@@ -9,6 +9,7 @@
 #include "app/UiState.h"
 #include "controls/AbstractListView.h"
 #include "controls/SortableItems.h"
+#include "controls/FilterEdit.h"
 #include "controls/StatusFilterBar.h"
 #include "controls/TorrentFilterProxy.h"
 #include "controls/TorrentListModel.h"
@@ -17,10 +18,12 @@
 #include "controls/TorrentProgressDelegate.h"
 #include "dialogs/AddTorrentDialog.h"
 #include "dialogs/EditTrackersDialog.h"
+#include "dialogs/TorrentCreatorDialog.h"
 #include "dialogs/TorrentOptionsDialog.h"
 #include "dialogs/TorrentDetailsDialog.h"
 #include "prefs/Preferences.h"
 #include "utils/Clipboard.h"
+#include "utils/CountryFlags.h"
 #include "utils/IpcFeedback.h"
 #include "utils/ListActivation.h"
 #include "utils/Log.h"
@@ -34,6 +37,7 @@
 #include "utils/TorrentAdd.h"
 #include "utils/TorrentLinks.h"
 #include "utils/ViewNavigation.h"
+#include "utils/ArgStr.h"
 
 #include <QAction>
 #include <QCborArray>
@@ -272,26 +276,29 @@ bool TorrentPanel::engineRunning() const
 void TorrentPanel::applyDisplayOptions()
 {
     m_filterBar->setRowOn(theUiState.showTorrentStatusFilter());
+    m_textFilter->setShown(thePrefs.showExtControls());
     updateSummary();   // DHT v4/v6 split follows ext controls
 }
 
 void TorrentPanel::dragEnterEvent(QDragEnterEvent* event)
 {
-    if (!gui::torrentDropFiles(event->mimeData()).isEmpty())
+    if (takesDrop(event->mimeData()))
         event->acceptProposedAction();
 }
 
 void TorrentPanel::dragMoveEvent(QDragMoveEvent* event)
 {
-    if (!gui::torrentDropFiles(event->mimeData()).isEmpty())
+    if (takesDrop(event->mimeData()))
         event->acceptProposedAction();
 }
 
 void TorrentPanel::dropEvent(QDropEvent* event)
 {
-    if (acceptTorrentDrop(event->mimeData()))
+    // .torrent files are added; other files and folders open the Torrent Creator
+    if (acceptTorrentDrop(event->mimeData()) || TorrentCreatorDialog::runFromDrop(m_ipc, this, event->mimeData()))
         event->acceptProposedAction();
 }
+
 
 // ---------------------------------------------------------------------------
 // Private — construction
@@ -359,7 +366,16 @@ void TorrentPanel::setupUi()
     m_pasteMagnetAction = new QAction(menuIcon("eD2kLinkPaste.ico"), tr("Paste Magnet Links"), this);
     connect(m_pasteMagnetAction, &QAction::triggered, this, &TorrentPanel::onPasteMagnets);
 
-    layout->addWidget(toolbar);
+    // #282: filter box right of the toolbar, "Show more controls" only
+    auto* toolRow = new QHBoxLayout;
+    toolRow->setContentsMargins(0, 0, 0, 0);
+    toolRow->setSpacing(2);
+    toolRow->addWidget(toolbar, 1);
+    m_textFilter = new FilterEdit(this);
+    m_textFilter->setFixedWidth(200);
+    m_textFilter->setShown(thePrefs.showExtControls());
+    toolRow->addWidget(m_textFilter);
+    layout->addLayout(toolRow);
     layout->addWidget(createFilterBar());
 
     m_splitter = new QSplitter(Qt::Vertical, this);
@@ -377,8 +393,17 @@ void TorrentPanel::setupUi()
     m_proxy->setDynamicSortFilter(true);
 
     m_view->setModel(m_proxy);
+    m_textFilter->setIgnoredColumns({TorrentListModel::ColNetworks});   // icons only
+    m_textFilter->setHeader(m_view->header());
+    connect(m_textFilter, &FilterEdit::filterChanged, this, [this](const QStringList& tokens, int column) {
+        m_proxy->setTextFilter(tokens, column);
+        updateSummary();
+        onSelectionChanged();
+    });
     m_view->setItemDelegateForColumn(TorrentListModel::ColProgress,
                                      new TorrentProgressDelegate(m_view));
+    // #261: several network icons in one cell
+    m_view->setItemDelegateForColumn(TorrentListModel::ColNetworks, new FlagDecorationDelegate(m_view));
     m_view->setRootIsDecorated(true);   // multi-file torrents list their files
     m_view->setUniformRowHeights(true);
     m_view->setAlternatingRowColors(true);
@@ -394,11 +419,18 @@ void TorrentPanel::setupUi()
                               TorrentListModel::ColPeers, TorrentListModel::ColRatio,
                               TorrentListModel::ColAdded, TorrentListModel::ColUploaded,
                               TorrentListModel::ColSessionUploaded, TorrentListModel::ColDownloaded});
+    // #261: a layout saved before Networks existed (or none) gets it next to the name
+    const bool placeNetworks = theUiState.headerStateSectionCount(QStringLiteral("torrentList"))
+                               <= TorrentListModel::ColNetworks;
     // After setModel(): a header without sections cannot take a restore
     view->bindColumns(QStringLiteral("torrentList"),
-                      {260, 80, 80, 150, 110, 80, 80, 75, 75, 50, 90, 120, 90, 90, 90},
+                      {260, 80, 80, 150, 110, 80, 80, 75, 75, 50, 90, 120, 90, 90, 90, 60},
                       {TorrentListModel::ColUploaded, TorrentListModel::ColSessionUploaded,
                        TorrentListModel::ColDownloaded});
+    if (placeNetworks) {
+        auto* hdr = view->header();
+        hdr->moveSection(hdr->visualIndex(TorrentListModel::ColNetworks), hdr->visualIndex(TorrentListModel::ColName) + 1);
+    }
 
     connect(m_model, &TorrentListModel::filesWanted, this, &TorrentPanel::fetchFiles);
     connect(m_view, &QTreeView::expanded, this, [this](const QModelIndex& index) {
@@ -1074,8 +1106,8 @@ void TorrentPanel::updateSummary()
         // ext controls: v4 / v6 apart (one DHT per listen socket family)
         const QString dht = thePrefs.showExtControls()
             ? tr("%1 v4 / %2 v6")
-                  .arg(m_status.value(QStringLiteral("dhtNodesV4")).toInteger())
-                  .arg(m_status.value(QStringLiteral("dhtNodesV6")).toInteger())
+                  .arg(argStr(m_status.value(QStringLiteral("dhtNodesV4")).toInteger()),
+                       argStr(m_status.value(QStringLiteral("dhtNodesV6")).toInteger()))
             : QString::number(m_status.value(QStringLiteral("dhtNodes")).toInteger());
         m_summary->setText(
             tr("%n torrent(s), %1 active — Down: %2, Up: %3 — DHT: %4 nodes — Port %5 %6", nullptr,
@@ -1143,6 +1175,11 @@ void TorrentPanel::setFilePriority(int priority)
             m_poller->refreshNow();
         });
     }
+}
+
+bool TorrentPanel::takesDrop(const QMimeData* mime) const
+{
+    return !gui::torrentDropFiles(mime).isEmpty() || TorrentCreatorDialog::acceptsDrop(m_ipc, mime);
 }
 
 } // namespace eMule

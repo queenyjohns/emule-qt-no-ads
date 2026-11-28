@@ -99,6 +99,8 @@
 #include "prefs/LegacyConfigImport.h"
 #include "prefs/PreferenceSchema.h"
 #include "prefs/Preferences.h"
+#include "app/ConfigBackup.h"
+#include "utils/BackgroundFileWriter.h"
 #include "net/Packet.h"
 #include "protocol/ED2KLink.h"
 #include "search/GlobalSearchScheduler.h"
@@ -122,6 +124,7 @@
 #include "utils/PathUtils.h"
 #include "utils/Log.h"
 #include "utils/TimeUtils.h"
+#include "utils/ArgStr.h"
 
 #include <QCoreApplication>
 #include <QDate>
@@ -536,6 +539,7 @@ void IpcClientHandler::onMessageReceived(const IpcMessage& msg)
     case IpcMsgType::GetConvertJobs:       handleGetConvertJobs(msg); break;
     case IpcMsgType::FindLegacyProfiles:   handleFindLegacyProfiles(msg); break;
     case IpcMsgType::ImportLegacyProfile:  handleImportLegacyProfile(msg); break;
+    case IpcMsgType::BackupConfig:         handleBackupConfig(msg); break;
     case IpcMsgType::RemoveConvertJob:     handleRemoveConvertJob(msg); break;
     case IpcMsgType::RetryConvertJob:      handleRetryConvertJob(msg); break;
     case IpcMsgType::StopDownload:         handleStopDownload(msg); break;
@@ -2110,6 +2114,7 @@ void stepPartImport(const QString& hashHex)
         if (file) {
             file->setFileOp(PartFileOp::None);
             if (it->imported > 0) {
+                file->flushBuffer();
                 file->updateCompletedInfos();
                 file->savePartFile();
             }
@@ -2414,8 +2419,17 @@ void IpcClientHandler::handleGetStats(const IpcMessage& msg)
     // Not part of the core snapshot: the stream token belongs to the web server this
     // daemon runs, which core has no handle on.
     if (auto* da = DaemonApp::instance()) {
-        if (auto* ws = da->webServer())
-            stats.insert(QStringLiteral("streamToken"), ws->streamToken());
+        // A server that failed to bind sends an empty token: the GUI then says preview
+        // is unavailable instead of handing the player a dead URL
+        const WebServer* ws = da->webServer();
+        const bool running = ws && ws->isRunning();
+        stats.insert(QStringLiteral("streamToken"), running ? ws->streamToken() : QString());
+        if (running) {
+            // what is actually served: preview-only mode is plain HTTP on loopback
+            // whatever the HTTPS option says
+            stats.insert(QStringLiteral("streamHttps"), ws->isHttps());
+            stats.insert(QStringLiteral("streamLocalHost"), ws->localHost());
+        }
     }
 
     // Likewise daemon-only: the split is Usenet's, and core must not know Usenet.
@@ -2561,7 +2575,7 @@ void IpcClientHandler::handleReloadPreferences(const IpcMessage& msg)
         emitPrefOutcome(outcome);
     }
     logInfo(QStringLiteral("Preferences reloaded from %1: %2 changed")
-                .arg(path).arg(changes.size()));
+                .arg(argStr(path), argStr(changes.size())));
 
     QCborMap result;
     insertPortResult(result, outcome);
@@ -3293,6 +3307,33 @@ void IpcClientHandler::handleImportLegacyProfile(const IpcMessage& msg)
 }
 
 // ---------------------------------------------------------------------------
+// handleBackupConfig — copy of the config folder (#268)
+// ---------------------------------------------------------------------------
+
+void IpcClientHandler::handleBackupConfig(const IpcMessage& msg)
+{
+    // the latest settings first; queued saves are flushed on the worker
+    thePrefs.save();
+    const int seqId = msg.seqId();
+    offCoreThread(this,
+        [dest = QDir::fromNativeSeparators(msg.fieldString(0).trimmed()), configDir = thePrefs.configDir()] {
+            BackgroundFileWriter::instance().flush();
+            return ConfigBackup::run(configDir, dest);
+        },
+        [seqId](IpcClientHandler& self, const std::expected<ConfigBackupResult, QString>& out) {
+            if (!out) {
+                self.sendMessage(IpcMessage::makeResult(seqId, false, out.error()));
+                return;
+            }
+            self.sendMessage(IpcMessage::makeResult(seqId, true,
+                                                    QCborMap{{QStringLiteral("folder"), out->folder},
+                                                             {QStringLiteral("files"), out->files},
+                                                             {QStringLiteral("bytes"), qint64(out->bytes)},
+                                                             {QStringLiteral("failed"), out->failed}}));
+        });
+}
+
+// ---------------------------------------------------------------------------
 // handleGetConvertJobs — return snapshot of all conversion jobs
 // ---------------------------------------------------------------------------
 
@@ -3730,10 +3771,10 @@ void IpcClientHandler::handleApplyHttpCacheConfig(const IpcMessage& msg)
             // clears that server's publish backoff on its own.
             logInfo(QStringLiteral("HTTP Cache: server %1 (%2) configured, uploads enabled "
                                    "(%3 in the rotation)")
-                        .arg(QUrl(baseUrl).host(),
-                             info.implementation.isEmpty() ? QStringLiteral("v%1").arg(info.version)
-                                                           : info.implementation)
-                        .arg(thePrefs.httpCacheServers().size()));
+                        .arg(argStr(QUrl(baseUrl).host()),
+                             argStr(info.implementation.isEmpty() ? QStringLiteral("v%1").arg(info.version)
+                                                           : info.implementation),
+                             argStr(thePrefs.httpCacheServers().size())));
 
             self->sendMessage(IpcMessage::makeResult(seqId, true, QCborValue(QString())));
         });
@@ -5532,6 +5573,8 @@ bool IpcClientHandler::applyPreferenceBt(const QString& key, const QCborValue& v
         thePrefs.setBtSeedRatioPercent(int(val.toInteger()));
     else if (key == QStringLiteral("btSeedTimeLimitMinutes"))
         thePrefs.setBtSeedTimeLimitMinutes(int(val.toInteger()));
+    else if (key == QStringLiteral("btSeedMinSeeds"))
+        thePrefs.setBtSeedMinSeeds(int(val.toInteger()));
     else if (key == QStringLiteral("btDownloadSharePercent"))
         thePrefs.setBtDownloadSharePercent(int(val.toInteger()));
     else if (key == QStringLiteral("btUploadSharePercent"))
@@ -5942,6 +5985,7 @@ QCborMap indexerFeedToCbor(const IndexerFeed& feed, const indexer::IndexerFeedSt
         {QStringLiteral("indexers"),        indexers},
         {QStringLiteral("url"),             indexer::redactApiKey(QUrl(feed.url))},
         {QStringLiteral("hasUrl"),          !feed.url.isEmpty()},
+        {QStringLiteral("network"),         indexerFeedNetworkToString(feed.network)},
         {QStringLiteral("accept"),          feed.accept},
         {QStringLiteral("reject"),          feed.reject},
         {QStringLiteral("minSize"),         feed.minSize},
@@ -5973,6 +6017,7 @@ IndexerFeed indexerFeedFromCbor(const QCborMap& map)
     feed.maxAgeDays = int(map.value(QStringLiteral("maxAgeDays")).toInteger(0));
     feed.intervalMinutes = int(map.value(QStringLiteral("intervalMinutes")).toInteger(30));
     feed.grabExisting = map.value(QStringLiteral("grabExisting")).toBool(false);
+    feed.network = indexerFeedNetworkFromString(map.value(QStringLiteral("network")).toString());
     feed.downloadCategory = int(map.value(QStringLiteral("downloadCategory")).toInteger(0));
 
     for (const auto& cat : map.value(QStringLiteral("categories")).toArray())
@@ -6294,8 +6339,8 @@ void IpcClientHandler::handleTestIndexer(const IpcMessage& msg)
             payload.append(caps.serverTitle.isEmpty()
                                ? tr("Connected. %1 categories.").arg(caps.categories.size())
                                : tr("%1 — %2 categories.")
-                                     .arg(caps.serverTitle)
-                                     .arg(caps.categories.size()));
+                                     .arg(argStr(caps.serverTitle),
+                                          argStr(caps.categories.size())));
             payload.append(QString{});
         } else {
             payload.append(QString{});

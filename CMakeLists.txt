@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(eMuleQt
-    VERSION 0.7.41
+    VERSION 0.7.43
     DESCRIPTION "eMule P2P file sharing client — Qt 6 port"
     LANGUAGES CXX
 )
@@ -10,14 +10,14 @@ project(eMuleQt
 # Qt 6 discovery — hint paths for local Qt installations
 # ---------------------------------------------------------------------------
 if(WIN32)
-    foreach(_qt_ver 6.10.2 6.10.1 6.10.0 6.9.0 6.8.0)
+    foreach(_qt_ver 6.12.1 6.10.2 6.10.1 6.10.0 6.9.0 6.8.0)
         list(APPEND _qt_hints "C:/Qt/${_qt_ver}/msvc2022_64")
         list(APPEND _qt_hints "$ENV{USERPROFILE}/Qt/${_qt_ver}/msvc2022_64")
     endforeach()
 elseif(APPLE)
-    list(APPEND _qt_hints "$ENV{HOME}/Qt/6.10.2/macos")
+    list(APPEND _qt_hints "$ENV{HOME}/Qt/6.12.1/macos")
 else()
-    list(APPEND _qt_hints "$ENV{HOME}/Qt/6.10.2/gcc_64")
+    list(APPEND _qt_hints "$ENV{HOME}/Qt/6.12.1/gcc_64")
 endif()
 foreach(_hint IN LISTS _qt_hints)
     if(EXISTS "${_hint}")
@@ -495,7 +495,7 @@ if(EMULE_BITTORRENT)
     set(_emule_bt_hint "Install Boost >= 1.74 headers (brew install boost, apt install libboost-dev, \
 vcpkg, or set BOOST_ROOT) or pass -DEMULE_BITTORRENT=OFF")
     # bump here, in src/vcpkg.json and src/vcpkg-ports/libtorrent together
-    set(EMULE_LIBTORRENT_VERSION 2.1.2)
+    set(EMULE_LIBTORRENT_VERSION 2.1.3)
     find_package(LibtorrentRasterbar ${EMULE_LIBTORRENT_VERSION} EXACT CONFIG QUIET)
     set(_emule_lt_installed OFF)
     if(LibtorrentRasterbar_FOUND)
@@ -569,12 +569,9 @@ vcpkg, or set BOOST_ROOT) or pass -DEMULE_BITTORRENT=OFF")
             GIT_SHALLOW    TRUE
             # try_signal is in the library's source list; the other submodules are not needed
             GIT_SUBMODULES deps/try_signal
-            # I2P SAM use-after-free, upstream 51000e88 (docs/torrent/libtorrent-i2p-stream-uaf.md)
-            PATCH_COMMAND ${CMAKE_COMMAND}
-                -DPATCH=${CMAKE_SOURCE_DIR}/src/vcpkg-ports/libtorrent/fix-i2p-stream-buffer-uaf.patch
-                -P ${CMAKE_SOURCE_DIR}/cmake/ApplyPatch.cmake
+            # I2P SAM use-after-free fixed upstream in 2.1.3 (51000e88), patch dropped
             # I2P peer sockets skip the outgoing interface bind (docs/torrent/libtorrent-i2p-stream-uaf.md)
-            COMMAND ${CMAKE_COMMAND}
+            PATCH_COMMAND ${CMAKE_COMMAND}
                 -DPATCH=${CMAKE_SOURCE_DIR}/src/vcpkg-ports/libtorrent/fix-i2p-outgoing-bind.patch
                 -P ${CMAKE_SOURCE_DIR}/cmake/ApplyPatch.cmake
             # incoming I2P comes back after a router restart (docs/torrent/libtorrent-i2p-stream-uaf.md)

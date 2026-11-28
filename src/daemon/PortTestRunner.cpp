@@ -11,12 +11,15 @@
 #include "net/GuardedNetworkAccessManager.h"
 #include "net/HttpDefaults.h"
 #include "net/PortTestApi.h"
+#include "net/PortTestGate.h"
+#include "ipfilter/IPFilter.h"
 #include "prefs/Preferences.h"
 #include "kademlia/KadFirewallTester.h"
 #include "kademlia/Kademlia.h"
 #include "server/ServerConnect.h"
 #include "utils/Log.h"
 #include "utils/OtherFunctions.h"
+#include "utils/ArgStr.h"
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -44,6 +47,10 @@ constexpr int kRetryDelayMs = 2'000;
 /// How long a test waits for the public IPv4 (server/Kad) before going without it.
 constexpr int kIpv4WaitMs = 15'000;
 constexpr int kIpv4PollMs = 500;
+/// eD2K: porttest/source answers at once; an older server's 404 too.
+constexpr int kSourceTimeoutMs = 8'000;
+/// eD2K: the gate closes with the reply; this only ends it should the reply never come.
+constexpr int kGateMs = kTransferTimeoutMs + 5'000;
 
 QNetworkAccessManager* nam()
 {
@@ -268,9 +275,9 @@ void send(PortTestApi::Request req, std::shared_ptr<Ed3kRun> run, const Done& do
     httpReq.setTransferTimeout(kTransferTimeoutMs);
     QNetworkReply* reply = nam()->get(httpReq);
     logInfo(QStringLiteral("Port test: %1 port %2 via %3")
-                .arg(networkName(req.network))
-                .arg(req.network == PortTestApi::Network::Ed3k ? req.udpPort : req.tcpPort)
-                .arg(QLatin1String(kWebsiteUrl)));
+                .arg(argStr(networkName(req.network)),
+                     argStr(req.network == PortTestApi::Network::Ed3k ? req.udpPort : req.tcpPort),
+                     QLatin1String(kWebsiteUrl)));
 
     QObject::connect(reply, &QNetworkReply::finished, reply, [reply, req, run, done] {
         reply->deleteLater();
@@ -301,6 +308,71 @@ void send(PortTestApi::Request req, std::shared_ptr<Ed3kRun> run, const Done& do
             result.insert(QStringLiteral("obfuscated"), parsed.obfuscated);
         done(true, result, 0, {});
     });
+}
+
+/// eD2K: the IP filter hits of the gate, as the result's `filterHits`.
+QCborArray hitsToCbor(const std::vector<PortTestGate::Hit>& hits)
+{
+    QCborArray out;
+    for (const PortTestGate::Hit& h : hits) {
+        out.append(QCborMap{
+            {QStringLiteral("address"), ipstr(h.address)},
+            {QStringLiteral("description"), h.description},
+            {QStringLiteral("tcp"), h.tcp},
+        });
+        logWarning(QStringLiteral("Port test: the IP filter rejected %1 %2 during the test (%3)")
+                       .arg(h.tcp ? QStringLiteral("TCP") : QStringLiteral("UDP"), ipstr(h.address), h.description));
+    }
+    return out;
+}
+
+/// eD2K: the test server's addresses pass the IP filter while the test runs, and whatever
+/// else the filter rejects meanwhile goes into the result (#266).
+void sendEd2k(PortTestApi::Request req, std::shared_ptr<Ed3kRun> run, Done done)
+{
+    QNetworkRequest httpReq = Http::makeRequest(PortTestApi::sourceUrl());
+    httpReq.setTransferTimeout(kSourceTimeoutMs);
+    QNetworkReply* reply = nam()->get(httpReq);
+    QObject::connect(reply, &QNetworkReply::finished, reply, [reply, req, run, done] {
+        reply->deleteLater();
+        std::vector<Address> exempt;
+        QCborArray blocked;   // test server addresses our filter would have rejected
+        for (const QString& ip : PortTestApi::parseSources(reply->readAll())) {
+            const Address a = Address::fromString(ip);
+            if (a.isNull())
+                continue;
+            exempt.push_back(a);
+            if (theApp.ipFilter && theApp.ipFilter->isFiltered(a, thePrefs.ipFilterLevel())) {
+                const QString why = theApp.ipFilter->lastHitDescription();
+                blocked.append(QCborMap{{QStringLiteral("address"), ip}, {QStringLiteral("description"), why}});
+                logInfo(QStringLiteral("Port test: the IP filter blocks the test server %1 (%2): let through for the test")
+                            .arg(ip, why));
+            }
+        }
+        PortTestGate::open(std::move(exempt), kGateMs);
+        send(req, run, [done, blocked](bool ok, const QCborMap& result, int failure, const QString& detail) {
+            const QCborArray hits = hitsToCbor(PortTestGate::close());
+            if (!ok) {
+                done(ok, result, failure, detail);
+                return;
+            }
+            QCborMap out = result;
+            if (!hits.isEmpty())
+                out.insert(QStringLiteral("filterHits"), hits);
+            if (!blocked.isEmpty())
+                out.insert(QStringLiteral("serverFiltered"), blocked);
+            done(ok, out, failure, detail);
+        });
+    });
+}
+
+/// Sends the test; eD2K through the IP filter gate.
+void start(PortTestApi::Request req, std::shared_ptr<Ed3kRun> run, Done done)
+{
+    if (req.network == PortTestApi::Network::Ed2k)
+        sendEd2k(std::move(req), std::move(run), std::move(done));
+    else
+        send(std::move(req), std::move(run), done);
 }
 
 } // namespace
@@ -362,7 +434,7 @@ void run(int network, Done done)
     }
     if (theApp.publicIP() != 0 || !(req.families & PortTestApi::kSeenIPv4)
         || (req.network == PortTestApi::Network::Ed3k && !ed3kViews().first.address.isEmpty())) {
-        send(std::move(req), std::move(ed3kRun), std::move(done));
+        start(std::move(req), std::move(ed3kRun), std::move(done));
         return;
     }
     // right after start the public IPv4 is not known yet: a request leaving over IPv6
@@ -375,7 +447,7 @@ void run(int network, Done done)
             return;
         timer->stop();
         timer->deleteLater();
-        send(req, ed3kRun, done);
+        start(req, ed3kRun, done);
     });
     timer->start(kIpv4PollMs);
 }

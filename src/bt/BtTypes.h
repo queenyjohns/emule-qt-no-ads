@@ -46,6 +46,8 @@ struct BtSettings {
     int seedRatioPercent = 100;
     /// stop seeding after this long; 0 = no limit
     int seedTimeLimitMinutes = 0;
+    /// stop seeding once the swarm has this many other seeds (tracker scrape); 0 = no limit
+    int seedMinSeeds = 0;
     /// "eMuleQt/0.6.26", and its numbers for the peer ID
     QString userAgent;
     int versionMajor = 0;
@@ -184,6 +186,8 @@ struct BtTorrentRow {
     double availability = -1;
     /// I2P torrent (torrent_flags::i2p_torrent): I2P peers only unless mixed
     bool i2p = false;
+    /// BtI2pMode the torrent runs in (Networks column, #261); set by BtSession::torrents()/torrent()
+    int i2pMode = 0;
 };
 
 struct BtFileRow {
@@ -271,6 +275,8 @@ struct BtTorrentOptions {
     int ratioPercent = 100;
     BtLimitMode seedTimeMode = BtLimitMode::Global;
     int seedTimeMinutes = 0;
+    BtLimitMode minSeedsMode = BtLimitMode::Global;
+    int minSeeds = 0;
     /// nullopt = leave as is (a client that does not know the key)
     std::optional<BtI2pMode> i2pMode;
 

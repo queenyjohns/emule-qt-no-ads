@@ -26,6 +26,7 @@ namespace eMule {
 
 class IpcClient;
 class PanelPoller;
+class FilterEdit;
 class StatusFilterBar;
 class TorrentDetailsDialog;
 class TorrentFilterProxy;
@@ -98,6 +99,8 @@ protected:
 
 private:
     void setupUi();
+    /// .torrent files, or files / a folder for the Torrent Creator
+    [[nodiscard]] bool takesDrop(const QMimeData* mime) const;
     QWidget* createFilterBar();
     void setFilter(int filter);
     void updateFilterCounts();
@@ -148,6 +151,7 @@ private:
     TorrentListModel* m_model = nullptr;
     TorrentFilterProxy* m_proxy = nullptr;
     StatusFilterBar* m_filterBar = nullptr;
+    FilterEdit* m_textFilter = nullptr;   ///< #282: beside the toolbar, ext controls only
     QSplitter* m_splitter = nullptr;
     TorrentListsPane* m_pane = nullptr;
 

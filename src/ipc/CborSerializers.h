@@ -538,7 +538,7 @@ inline void insertDownloadSeed(QCborMap& m, const SearchFile& f)
     m.insert(QStringLiteral("userHash"),        md4str(c.userHash()));
     m.insert(QStringLiteral("software"),        c.dbgGetFullClientSoftVer());
     m.insert(QStringLiteral("uploadState"),     c.uploadStateToken());
-    m.insert(QStringLiteral("uploadStalled"),   c.uploadStalled());
+    m.insert(QStringLiteral("uploadWait"),      c.uploadWaitToken());
     m.insert(QStringLiteral("downloadState"),   c.downloadStateDisplayString());
     m.insert(QStringLiteral("sourceFrom"),      static_cast<int>(c.sourceFrom()));
     // Upload fields
@@ -695,7 +695,15 @@ inline void insertDownloadSeed(QCborMap& m, const SearchFile& f)
         m.insert(QStringLiteral("fileDown"), static_cast<qint64>(c->fileDown(file.fileHash())));
         m.insert(QStringLiteral("a4af"), true);
         m.insert(QStringLiteral("noNeededHere"), c->isInNoNeededList(&file));
-        m.insert(QStringLiteral("swapSuspended"), c->reqFile() && c->isSwapSuspended(c->reqFile()));
+        // Swap to this row's file, not the source's current one (MFC asks the latter,
+        // which is never suspended — DownloadListCtrl.cpp:1118). Gates of the periodic check.
+        bool byStamp = false;
+        const uint64 blockMs = c->swapBlockLeft(&file, false, c->isInNoNeededList(&file), &byStamp);
+        m.insert(QStringLiteral("swapSuspended"), blockMs > 0);
+        if (blockMs > 0) {
+            m.insert(QStringLiteral("swapBlockSecs"), static_cast<qint64>((blockMs + 999) / 1000));
+            m.insert(QStringLiteral("swapBlockStamp"), byStamp);
+        }
         clients.append(m);
     }
     return clients;

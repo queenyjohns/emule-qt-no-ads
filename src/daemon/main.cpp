@@ -27,6 +27,7 @@
 #include "utils/Log.h"
 #include "utils/SidecarProcess.h"
 #include "utils/StallWatchdog.h"
+#include "utils/ArgStr.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -312,7 +313,7 @@ int main(int argc, char* argv[])
             QString holderHost;
             (void)coreLock.getLockInfo(&holderPid, &holderHost, nullptr);
             return failStart(QStringLiteral("Another core (pid %1) is already running with the "
-                                            "config at %2").arg(holderPid).arg(configDir));
+                                            "config at %2").arg(eMule::argStr(holderPid), eMule::argStr(configDir)));
         }
         case QLockFile::PermissionError:
             return failStart(QStringLiteral("Cannot create the lock file %1: permission denied. "
@@ -344,12 +345,14 @@ int main(int argc, char* argv[])
     }
 
     // One default core per user, wherever it was installed: the setup's per-user
-    // config and a portable copy each have a profile lock of their own. A --config
-    // profile stays separate, unless it names the default one.
+    // config has a profile lock of its own. A --config profile or a portable copy
+    // stays separate, unless a --config names the default one.
     // Only built in here: its path creates ~/eMuleQt, which a --config profile never needs (#153)
     std::optional<QLockFile> userLockHolder;
     const eMule::AppConfig::UserCore lastUserCore = eMule::AppConfig::lastUserCore();
-    if (cli.configOverride().isEmpty() || eMule::AppConfig::sameDir(configDir, lastUserCore.configDir)) {
+    if (!eMule::AppConfig::isPortableProfile()
+        && (cli.configOverride().isEmpty()
+            || eMule::AppConfig::sameDir(configDir, lastUserCore.configDir))) {
         QLockFile& userLock = userLockHolder.emplace(eMule::AppConfig::userCoreLockPath());
         userLock.setStaleLockTime(0);
         // No wait: a holder with our profile was gone once the lock above was ours
@@ -365,8 +368,8 @@ int main(int argc, char* argv[])
             return failStart(QStringLiteral("Another core (pid %1) is already running for this user "
                                             "with the config at %2. Close it first, or start this "
                                             "one with --config <dir>.")
-                                 .arg(holderPid)
-                                 .arg(QDir::toNativeSeparators(lastUserCore.configDir)));
+                                 .arg(eMule::argStr(holderPid),
+                                      eMule::argStr(QDir::toNativeSeparators(lastUserCore.configDir))));
         } else {
             eMule::logWarning(QStringLiteral("Cannot create the lock file %1; other installs "
                                              "may start a core of their own")
@@ -439,8 +442,8 @@ int main(int argc, char* argv[])
         eMule::logWarning(lastRun);
 
     eMule::logInfo(QStringLiteral("Daemon running. IPC listening on %1:%2")
-                       .arg(ipcHost.isEmpty() ? QStringLiteral("127.0.0.1") : ipcHost)
-                       .arg(ipcPort));
+                       .arg(eMule::argStr(ipcHost.isEmpty() ? QStringLiteral("127.0.0.1") : ipcHost),
+                            eMule::argStr(ipcPort)));
 
     // A stuck event loop leaves its stack in crashes/ (report 20). After start():
     // loading the share may take long before the loop runs at all

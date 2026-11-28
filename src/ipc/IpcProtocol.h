@@ -113,7 +113,9 @@ enum class IpcMsgType : int {
                                 ///<   peer goes back to ChatState::None and a dial we
                                 ///<   started for it is cancelled. MFC does this from
                                 ///<   CChatSelector::EndSession (ChatSelector.cpp:464).
-    /// {...StatsSnapshot, streamToken, maxDownloadKb, usenetLimitKb, ed2kBudgetKb}.
+    /// {...StatsSnapshot, streamToken, streamHttps?, streamLocalHost?, maxDownloadKb,
+    /// usenetLimitKb, ed2kBudgetKb}. streamToken is empty while the web server is not
+    /// listening; the two stream* fields come only while it is (TLS, host for a local player).
     /// The last three are the live download split, effective caps in KB/s with
     /// every sentinel resolved: 0 only when maxDownloadKb is 0 (unlimited), and a
     /// cap below maxDownloadKb means the other engine is busy.
@@ -158,6 +160,9 @@ enum class IpcMsgType : int {
     /// [id] -> [ok, {found, row of GetKadIncoming, wanted, own: {id}, asker: {id, addr, cc,
     /// version}, handed: [{id, addr, cc, version}]}] — one request for the incoming search graph
     GetKadIncomingGraph  = 228,
+    /// [destFolder: string] -> [ok, {folder, files, bytes, failed}] | [false, error] — copy of
+    /// the config folder into destFolder/eMuleQt-config-<stamp> on the core's disk (#268)
+    BackupConfig         = 229,
     SaveSchedules        = 222,  ///< [enabled: bool, schedules: CborArray] — replace all
     ScanImportFolder     = 230,  ///< [folder: string, removeSource: bool] → scan + queue + return jobs
     GetConvertJobs       = 231,  ///< [] → current job list with statuses
@@ -467,7 +472,7 @@ enum class IpcMsgType : int {
     GrabIndexerResult       = 707,
 
     /// [] -> [[{name, kind, enabled, query, categories, indexers, url, hasUrl,
-    ///          accept, reject, minSize, maxSize, maxAgeDays, intervalMinutes,
+    ///          network (auto|usenet|bittorrent, URL feeds), accept, reject, minSize, maxSize, maxAgeDays, intervalMinutes,
     ///          grabExisting, lastPolled, lastError, lastMatched, seenCount,
     ///          polling}]]
     /// `url` arrives **redacted** and `hasUrl` says whether one is stored. A
@@ -879,7 +884,7 @@ enum class IpcMsgType : int {
     /// [id: string] -> bool
     ReannounceTorrent       = 809,
     /// [id: string, {downloadLimitKb, uploadLimitKb, maxPeers, ratioMode,
-    ///  ratioPercent, seedTimeMode, seedTimeMinutes}] -> bool
+    ///  ratioPercent, seedTimeMode, seedTimeMinutes, minSeedsMode, minSeeds}] -> bool
     /// Limits in KiB/s, 0 = none; maxPeers 0 = default; modes are BtLimitMode
     /// (0 global, 1 unlimited, 2 custom)
     SetTorrentOptions       = 810,

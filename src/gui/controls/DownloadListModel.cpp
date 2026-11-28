@@ -18,6 +18,7 @@
 #include "utils/PriorityText.h"
 #include "utils/RatingIcons.h"
 #include "utils/StringUtils.h"
+#include "utils/ArgStr.h"
 
 #include <QColor>
 #include <QFont>
@@ -167,6 +168,32 @@ int downloadStateSortOrder(const QString& state)
     return 15;
 }
 
+/// #261: the networks a file row runs on — its own first, then the joined ones
+QList<TransferNet> rowNetworks(const DownloadRow& d)
+{
+    const TransferNet ed3k = d.ed3kKey == QLatin1String("Anonymous") ? TransferNet::Ed3kAnon : TransferNet::Ed3k;
+    if (!d.isEd3k())
+        return d.jointEd3k ? QList{TransferNet::Ed2k, ed3k} : QList{TransferNet::Ed2k};
+    QList<TransferNet> nets;
+    // single transfer mode: the job's own network, ed3k once joined
+    if (d.isNetworkJob()) {
+        if (const auto own = transferNetOf(ed3kJoinOf(d.ed3kNetwork)))
+            nets << *own;
+        if (d.ed3kJoined)
+            nets << ed3k;
+        return nets;
+    }
+    nets << ed3k;
+    if (d.ed3kAliasNets.contains(QLatin1String("ed2k")))
+        nets << TransferNet::Ed2k;
+    for (const Ed3kJoin j : {Ed3kJoin::Torrent, Ed3kJoin::Usenet, Ed3kJoin::Hoster})
+        if (const auto net = transferNetOf(j); net && std::ranges::any_of(d.ed3kAliasNets, [j](const QString& tag) {
+                return ed3kJoinOf(tag) == j;
+            }))
+            nets << *net;
+    return nets;
+}
+
 } // anonymous namespace
 
 QList<std::pair<QString, QString>> cleanupRenames(const std::vector<DownloadRow>& files,
@@ -197,9 +224,9 @@ QString sourceTooltipText(const SourceRow& s, bool extended)
                                                ? QStringLiteral("(%1)").arg(DownloadListModel::tr("Unknown")) : s.userName);
     if (s.ed3k)
         info += u'\n' + ed3kNetworkText(s.ed3kAnon, ed3kJoinOf(s.ed3kJoin));
-    info += QStringLiteral("\n%1:%2:%3\n\n").arg(DownloadListModel::tr("Server"), s.serverAddr.isEmpty()
-                                                        ? QStringLiteral("0.0.0.0") : s.serverAddr)
-                .arg(s.serverPort);
+    info += QStringLiteral("\n%1:%2:%3\n\n").arg(argStr(DownloadListModel::tr("Server")), argStr(s.serverAddr.isEmpty()
+                                                        ? QStringLiteral("0.0.0.0") : s.serverAddr),
+                     argStr(s.serverPort));
     // not while it is being dialled or is sending: there is no next re-ask then
     if (s.downloadState != QLatin1String("Connecting") && s.downloadState != QLatin1String("Downloading")
         && s.nextReaskSecs >= 0)
@@ -218,6 +245,12 @@ QString sourceTooltipText(const SourceRow& s, bool extended)
         info += u'\n' + DownloadListModel::tr("Asked for another file");
         if (!s.otherFileName.isEmpty())
             info += QStringLiteral(": %1").arg(s.otherFileName);
+        // Why it is not moved here yet (not MFC)
+        if (s.swapSuspended && s.swapBlockSecs >= 0)
+            info += u'\n' + (s.swapBlockStamp
+                ? DownloadListModel::tr("Swap blocked for %1: the client said it lacks this file")
+                : DownloadListModel::tr("Swap blocked for %1: this file was asked recently"))
+                    .arg(formatSecondsHM(s.swapBlockSecs));
     }
 
     if (extended && !s.a4afFiles.isEmpty()) {
@@ -485,32 +518,32 @@ QVariant DownloadListModel::data(const QModelIndex& index, int role) const
     if (role == Qt::DecorationRole && index.column() == ColFileName) {
         // No own-comment overlay: MFC's download list overlays are the secure and
         // obfuscated badges, not this one (srchybrid/DownloadListCtrl.cpp:202-205).
-        // ed3k files: the ed3k client mark after the type icon; eD2K rows keep the
-        // slot blank while any ed3k row is listed, so names line up
-        // single transfer mode: the job's own network instead
-        const QString badge = d.isNetworkJob() ? networkIconPath(ed3kJoinOf(d.ed3kNetwork))
-                              : d.isEd3k() ? QStringLiteral(":/icons/ClientEd3k.ico")
-                              : m_hasEd3k ? QString(kEmptyBadge) : QString();
+        // was: an ed3k/network badge here; now the Networks column (#261)
         return fileMarksIcon(d.fileType, containerMark(d.containerSuspect, d.containerMislabelled),
                              /*ownComment*/ false,
-                             ratingMark(d.hasComment, d.userRating), badge);
+                             ratingMark(d.hasComment, d.userRating));
+    }
+
+    // #261: every network the file runs on, as icons; names in tooltip and sort
+    if (index.column() == ColNetworks) {
+        switch (role) {
+        case Qt::DecorationRole: return transferNetsIcon(rowNetworks(d));
+        case Qt::ToolTipRole:
+        case Qt::UserRole:       return transferNetsText(rowNetworks(d));
+        default:                 break;
+        }
     }
 
     if (role == Qt::DisplayRole) {
         switch (index.column()) {
-        // marked as the Messages panel marks ed3k friends (no MFC original)
-        case ColFileName:
-            if (d.isNetworkJob() && !d.ed3kJoined)
-                return tr("%1 (%2)").arg(d.fileName, networkName(ed3kJoinOf(d.ed3kNetwork)));
-            if (d.isNetworkJob())
-                return tr("%1 (ed3k + %2)").arg(d.fileName, networkName(ed3kJoinOf(d.ed3kNetwork)));
-            return d.isEd3k() ? tr("%1 (ed3k)").arg(d.fileName) : d.fileName;
+        // was: "(ed3k)" / "(ed3k + BitTorrent)" suffixes; now the Networks column (#261)
+        case ColFileName:   return d.fileName;
         case ColSize:       return formatByteSize(d.fileSize);
         case ColCompleted:  return formatByteSize(d.completedSize);
         case ColSpeed:      return d.datarate > 0 ? formatByteRate(d.datarate) : QString{};
         case ColProgress:   // while completing: how far the final hash/copy is
-            return QStringLiteral("%1%").arg(d.completionPermille >= 0 ? d.completionPermille / 10.0
-                                                                       : d.percentCompleted, 0, 'f', 1);
+            return QStringLiteral("%1%").arg(formatPercent(d.completionPermille >= 0 ? d.completionPermille / 10.0
+                                                                                     : d.percentCompleted));
         case ColSources:    return sourcesText(d);
         // The wire token, not a label: the column read "veryHigh" / "Auto [normal]".
         case ColPriority:   return downloadPriorityText(d.priority, d.isAutoDownPriority);
@@ -563,24 +596,27 @@ QVariant DownloadListModel::data(const QModelIndex& index, int role) const
         QString tip = tr(
             "File Name:\t%1\n"
             "ED2K Hash:\t%2\n"
-            "Size:\t%3\n"
-            "Completed:\t%4 (%5%)\n"
-            "Type:\t%6\n"
-            "Status:\t%7\n"
-            "Priority:\t%8\n"
-            "Sources:\t%9\n"
-            "Requests:\t%10\n"
-            "Accepted Requests:\t%11\n"
-            "Uploaded:\t%12")
-            .arg(d.fileName, d.hash,
-                 formatByteSize(d.fileSize),
-                 formatByteSize(d.completedSize),
-                 QString::number(d.percentCompleted, 'f', 1))
-            .arg(fileTypeText(d.fileType, d.fileName),
-                 statusText(d), downloadPriorityText(d.priority, d.isAutoDownPriority),
-                 sourcesText(d))
-            .arg(d.requests).arg(d.acceptedRequests)
-            .arg(formatByteSize(d.upTransferred));
+            "Size:\t%3")
+            .arg(argStr(d.fileName), argStr(d.hash), argStr(formatByteSize(d.fileSize)));
+        // #275: Temp file name, MFC GetInfoSummary IDS_FD_MET; empty for ed3k rows
+        if (!d.partMetName.isEmpty())
+            tip += u'\n' + tr("part.met file:\t%1").arg(d.partMetName);
+        tip += u'\n' + tr(
+            "Completed:\t%1 (%2%)\n"
+            "Type:\t%3\n"
+            "Status:\t%4\n"
+            "Priority:\t%5\n"
+            "Sources:\t%6\n"
+            "Requests:\t%7\n"
+            "Accepted Requests:\t%8\n"
+            "Uploaded:\t%9")
+            .arg(argStr(formatByteSize(d.completedSize)),
+                 formatPercent(d.percentCompleted),
+                 argStr(fileTypeText(d.fileType, d.fileName)),
+                 argStr(statusText(d)), argStr(downloadPriorityText(d.priority, d.isAutoDownPriority)),
+                 argStr(sourcesText(d)),
+                 argStr(d.requests), argStr(d.acceptedRequests),
+                 argStr(formatByteSize(d.upTransferred)));
         tip += extra;
         if (d.isNetworkJob())
             tip += u'\n' + tr("Network:\t%1 (single transfer mode)").arg(networkName(ed3kJoinOf(d.ed3kNetwork)));
@@ -696,6 +732,7 @@ QVariant DownloadListModel::headerData(int section, Qt::Orientation orientation,
     case ColTransferred:    return tr("Transferred");
     case ColEd3kKey:        return tr("ed3k Key");
     case ColPartNumber:     return tr("Part No.");
+    case ColNetworks:       return tr("Networks");
     default:                return {};
     }
 }
@@ -704,9 +741,6 @@ void DownloadListModel::setDownloads(std::vector<DownloadRow> incoming)
 {
     // Incremental update: avoids beginResetModel()/endResetModel() so that
     // the view's selection, expansion, and scroll state are preserved.
-
-    // before any dataChanged below: the name column's badge slot depends on it
-    m_hasEd3k = std::ranges::any_of(incoming, &DownloadRow::isEd3k);
 
     // 1. Build lookup of incoming hashes
     QHash<QString, size_t> incomingByHash;
